@@ -32,7 +32,7 @@ def extract_dates(text: str) -> list:
         
     return normalized_dates
 
-def detect_document_type(raw_lines: list) -> str:
+def detect_document_type(raw_lines: list) -> tuple:
     """
     Detects the document type based on key terms found in the raw text lines.
     
@@ -40,7 +40,7 @@ def detect_document_type(raw_lines: list) -> str:
         raw_lines (list): List of dictionaries/strings from OCR.
         
     Returns:
-        str: "Emirates ID", "Driving License", or "Unknown"
+        tuple: (document_type, confidence_score) where confidence is 0.0-1.0
     """
     combined_text = " ".join([line["text"].lower() for line in raw_lines])
     
@@ -58,19 +58,19 @@ def detect_document_type(raw_lines: list) -> str:
     
     # Check for driving license first
     if any(keyword in combined_text for keyword in dl_keywords):
-        return "Driving License"
+        return ("Driving License", 0.95)
         
     # Check for Emirates ID
     if any(keyword in combined_text for keyword in eid_keywords):
-        return "Emirates ID"
+        return ("Emirates ID", 0.95)
         
     # Regex checks for EID number pattern
     eid_pattern = r'784[- ]?\d{4}[- ]?\d{7}[- ]?\d'
     if re.search(eid_pattern, combined_text):
-        return "Emirates ID"
+        return ("Emirates ID", 0.90)
         
     # Default fallback
-    return "Unknown"
+    return ("Unknown", 0.0)
 
 def parse_emirates_id(raw_lines: list) -> dict:
     """
@@ -177,42 +177,53 @@ def parse_emirates_id(raw_lines: list) -> dict:
                 data["expiry_date"] = all_dates[1]
                 
     # 3. Extract Name
-    # EID names are usually uppercase lines. We check for keywords "Name" or "Name /"
+    # EID names are usually after "Name:" or "Name" label
     name_extracted = False
+    
+    # First, look for "Name" label (with or without colon)
     for i, line in enumerate(lines):
-        line_clean = re.sub(r'[^a-zA-Z\s\/]', '', line).strip()
-        # Find where "Name" starts
-        if any(keyword in line_clean.lower() for keyword in ["name", "full name", "nom"]):
-            # Look at same line after the keyword "Name"
-            # Remove the "Name" label
-            name_candidate = re.sub(r'(?i)name|full|nom|[:/]', '', line_clean).strip()
-            if len(name_candidate) > 4 and name_candidate.isupper():
+        line_lower = line.lower()
+        # Check for "Name:", "Name", "Name /" patterns
+        if re.search(r'\bname\s*[:/]?', line_lower):
+            # Extract text after "Name" label (remove the label itself)
+            name_candidate = re.sub(r'(?i)name\s*[:/]?', '', line).strip()
+            name_candidate = re.sub(r'[^a-zA-Z\s]', '', name_candidate).strip()
+            
+            # If name is on same line after "Name:"
+            if name_candidate and len(name_candidate) > 3:
                 data["name"] = name_candidate
                 name_extracted = True
                 break
+            
+            # Otherwise check next line for the actual name
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                next_clean = re.sub(r'[^a-zA-Z\s]', '', next_line).strip()
                 
-            # If not on same line, look at the next lines (usually 1st or 2nd line after "Name")
-            for offset in [1, 2]:
-                if i + offset < len(lines):
-                    next_line = lines[i + offset].strip()
-                    # Clean punctuation
-                    next_line_clean = re.sub(r'[^a-zA-Z\s]', '', next_line).strip()
-                    # Names are usually multiple words and UPPERCASE
-                    if len(next_line_clean) > 5 and next_line_clean.isupper() and "NATIONALITY" not in next_line_clean and "IDENTITY" not in next_line_clean:
-                        data["name"] = next_line_clean
-                        name_extracted = True
-                        break
-            if name_extracted:
-                break
-                
-    # Name Fallback: If not found through "Name" label, find the first multi-word all-caps line
+                # Check if next line is a name (2+ words, UPPERCASE, not keywords)
+                words = next_clean.split()
+                if (len(words) >= 2 and 
+                    next_clean.isupper() and 
+                    not any(kwd in next_clean for kwd in ["NATIONALITY", "IDENTITY", "UNITED", "ARAB", "EMIRATES", "CARD", "RESIDENT"])):
+                    data["name"] = next_clean
+                    name_extracted = True
+                    break
+    
+    # Fallback: Find uppercase multi-word lines that look like names
     if not data["name"]:
         for line in lines:
             line_clean = re.sub(r'[^a-zA-Z\s]', '', line).strip()
             words = line_clean.split()
-            if (len(words) >= 2 and 
-                line_clean.isupper() and 
-                not any(kwd in line_clean.lower() for kwd in ["authority", "identity", "united arab", "emirates", "card", "resident", "nationality", "sex"])):
+            
+            # Filter out keyword-only lines
+            excluded_keywords = ["NATIONALITY", "IDENTITY", "UNITED", "ARAB", "EMIRATES", "CARD", "RESIDENT", 
+                               "AUTHORITY", "DUBAI", "ABU", "DHABI", "SEX", "GENDER", "DATE", "BIRTH", "EXPIRY", "NUMBER"]
+            
+            is_name = (len(words) >= 2 and 
+                      line_clean.isupper() and 
+                      not any(kwd in line_clean for kwd in excluded_keywords))
+            
+            if is_name:
                 data["name"] = line_clean
                 break
 
@@ -288,17 +299,21 @@ def parse_driving_license(raw_lines: list) -> dict:
     lines = [l for l in lines if l]
     combined_text = " ".join(lines)
     
-    # 1. Extract License Number
-    # Typically listed next to "Lic. No." or "License No." or "No."
-    license_pattern = r'(?i)(?:lic(?:ense)?\.?\s*no\.?|license|number)\s*[:\-\s]*([0-9]+)'
+    # 1. Extract License Number - More aggressive search
+    license_pattern = r'(?i)(?:lic(?:ense)?\.?\s*no\.?|lic\s*#|no\.?)\s*[:\-\s]*([0-9]+)'
     license_match = re.search(license_pattern, combined_text)
     if license_match:
         data["license_number"] = license_match.group(1)
     else:
-        # Fallback: search for a standalone digit sequence between 6 and 9 digits
-        fallback_match = re.findall(r'\b(\d{7,9})\b', combined_text)
-        if fallback_match:
-            data["license_number"] = fallback_match[0]
+        # Fallback: Find any 7-9 digit number (typical license format)
+        all_numbers = re.findall(r'\b(\d{7,9})\b', combined_text)
+        # Prefer the first one that's not in dates
+        for num in all_numbers:
+            if num not in combined_text[:combined_text.find(num)-10:combined_text.find(num)+10]:
+                data["license_number"] = num
+                break
+        if not data["license_number"] and all_numbers:
+            data["license_number"] = all_numbers[0]
             
     # 2. Extract Dates (Birth, Issue, Expiry)
     all_dates = []
@@ -375,28 +390,41 @@ def parse_driving_license(raw_lines: list) -> dict:
             if not expiry_found and len(all_dates) >= 3:
                 data["expiry_date"] = all_dates[2]
 
-    # 3. Extract Name
+    # 3. Extract Name - Check for "Name" or "Holder" label (with or without colon)
     name_extracted = False
+    
+    # Look for "Name" or "Holder" patterns (with or without colon)
     for i, line in enumerate(lines):
-        line_clean = re.sub(r'[^a-zA-Z\s\/]', '', line).strip()
-        if any(keyword in line_clean.lower() for keyword in ["name", "full name", "holder"]):
-            name_candidate = re.sub(r'(?i)name|full|holder|[:/]', '', line_clean).strip()
-            if len(name_candidate) > 4 and name_candidate.isupper():
+        line_lower = line.lower()
+        # Check for "Name:", "Name", "Holder:", "Holder" patterns
+        if re.search(r'\b(name|holder)\s*[:/]?', line_lower):
+            # Try to extract name from same line after the label
+            name_candidate = re.sub(r'(?i)(name|holder)\s*[:/]?', '', line).strip()
+            name_candidate = re.sub(r'[^a-zA-Z\s]', '', name_candidate).strip()
+            
+            if name_candidate and len(name_candidate) > 3:
                 data["name"] = name_candidate
                 name_extracted = True
                 break
             
+            # If not on same line, check next 2 lines for name
             for offset in [1, 2]:
                 if i + offset < len(lines):
                     next_line_clean = re.sub(r'[^a-zA-Z\s]', '', lines[i + offset]).strip()
-                    if len(next_line_clean) > 5 and next_line_clean.isupper() and "DRIVING" not in next_line_clean and "LICENSE" not in next_line_clean:
+                    # Names are typically 2+ words, uppercase, not keywords
+                    words = next_line_clean.split()
+                    excluded = ["DRIVING", "LICENSE", "VALIDITY", "ISSUED", "DATE", "EXPIRY", "DOB"]
+                    
+                    if (len(words) >= 2 and 
+                        next_line_clean.isupper() and 
+                        not any(kwd in next_line_clean for kwd in excluded)):
                         data["name"] = next_line_clean
                         name_extracted = True
                         break
             if name_extracted:
                 break
                 
-    # Fallback name search
+    # Fallback name search: Find first uppercase multi-word line that's not a keyword
     if not data["name"]:
         for line in lines:
             line_clean = re.sub(r'[^a-zA-Z\s]', '', line).strip()
@@ -441,10 +469,11 @@ def parse_ocr_text(raw_lines: list) -> dict:
             "success": False,
             "document_type": "Unknown",
             "data": {},
-            "raw_text": []
+            "raw_text": [],
+            "detection_confidence": 0.0
         }
         
-    doc_type = detect_document_type(raw_lines)
+    doc_type, confidence = detect_document_type(raw_lines)
     raw_texts_only = [line["text"] for line in raw_lines]
     
     try:
@@ -463,7 +492,8 @@ def parse_ocr_text(raw_lines: list) -> dict:
             "success": success,
             "document_type": doc_type,
             "data": parsed_data,
-            "raw_text": raw_texts_only
+            "raw_text": raw_texts_only,
+            "detection_confidence": confidence
         }
         
     except Exception as e:
@@ -473,5 +503,6 @@ def parse_ocr_text(raw_lines: list) -> dict:
             "document_type": doc_type,
             "data": {},
             "raw_text": raw_texts_only,
+            "detection_confidence": confidence,
             "error": str(e)
         }

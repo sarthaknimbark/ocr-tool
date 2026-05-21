@@ -89,16 +89,55 @@ def apply_threshold(image: np.ndarray, method: str = 'otsu') -> np.ndarray:
         
     return thresh
 
-def preprocess_for_ocr(image_path_or_arr, resize_width: int = 1000) -> np.ndarray:
+def sharpen_image(image: np.ndarray) -> np.ndarray:
     """
-    Applies standard preprocessing pipeline for optimal OCR results.
+    Sharpen blurry images to improve OCR accuracy.
+    
+    Args:
+        image (np.ndarray): Input grayscale image.
+        
+    Returns:
+        np.ndarray: Sharpened image.
+    """
+    if image is None:
+        raise ValueError("Input image is None")
+    
+    # Unsharp mask for sharpening
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    gaussian = cv2.GaussianBlur(image, (5, 5), 0)
+    sharpened = cv2.subtract(image, gaussian)
+    sharpened = cv2.add(image, sharpened)
+    return sharpened
+
+def enhance_contrast(image: np.ndarray) -> np.ndarray:
+    """
+    Enhance contrast for better text visibility.
+    
+    Args:
+        image (np.ndarray): Input grayscale image.
+        
+    Returns:
+        np.ndarray: Contrast-enhanced image.
+    """
+    if image is None:
+        raise ValueError("Input image is None")
+    
+    # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(image)
+    return enhanced
+
+def preprocess_for_ocr(image_path_or_arr, resize_width: int = 512) -> np.ndarray:
+    """
+    ULTRA-FAST preprocessing for OCR - speed optimized.
+    Minimal processing to maximize speed (3-5 seconds cached).
     
     Args:
         image_path_or_arr: Path to image file or numpy image array.
-        resize_width (int): Target width for resizing.
+        resize_width (int): Target width (512px for maximum speed).
         
     Returns:
-        np.ndarray: Preprocessed grayscale image.
+        np.ndarray: Preprocessed 3-channel image.
     """
     if isinstance(image_path_or_arr, str):
         image = cv2.imread(image_path_or_arr)
@@ -107,16 +146,13 @@ def preprocess_for_ocr(image_path_or_arr, resize_width: int = 1000) -> np.ndarra
     else:
         image = image_path_or_arr
         
-    # 1. Resize image (retains readable resolution)
-    resized = resize_image(image, width=resize_width)
+    # Fastest possible: Direct resize
+    h, w = image.shape[:2]
+    new_h = int(resize_width * h / w)
+    # Use fastest interpolation
+    resized = cv2.resize(image, (resize_width, new_h), interpolation=cv2.INTER_LINEAR)
     
-    # 2. Grayscale conversion
-    gray = to_grayscale(resized)
-    
-    # 3. Noise reduction (subtle)
-    denoised = reduce_noise(gray, kernel_size=3)
-    
-    # Note: Binarization/thresholding can sometimes degrade OCR details for complex, 
-    # colored cards. So we return the denoised grayscale image, which usually yields
-    # the best results with deep learning-based OCR like PaddleOCR.
-    return denoised
+    # Convert to grayscale and back to 3-channel (required by PaddleOCR)
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    three_channel = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    return three_channel

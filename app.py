@@ -1,24 +1,31 @@
-import streamlit as st
 import os
-import json
+import sys
+
+os.environ["FLAGS_use_onednn"] = "0"
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Force CPU-only mode
+
 import cv2
+import json
 import numpy as np
 from PIL import Image
+import streamlit as st
 
 # Import package-level utility functions
 from utils import (
-    preprocess_for_ocr,
     extract_text,
     parse_ocr_text,
-    save_uploaded_file,
     save_json_output,
-    to_downloadable_json
+    preprocess_for_ocr,
+    save_uploaded_file,
+    to_downloadable_json,
 )
 
 # Page configuration for a premium, wide layout
 st.set_page_config(
     page_title="UAE Document OCR Extraction System",
-    page_icon="🇦🇪",
+    # page_icon="🇦🇪",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -106,19 +113,20 @@ with col_header_left:
     st.markdown('<div class="app-title">UAE Document OCR Engine</div>', unsafe_allow_html=True)
     st.markdown('<div class="subtitle">Extract structured identity details from Emirates IDs and Driving Licenses in real-time. <span class="badge">PaddleOCR Powered</span></div>', unsafe_allow_html=True)
 
-with col_header_right:
-    logo_path = "uae_ocr_project/assets/logo.png"
-    if os.path.exists(logo_path):
-        st.image(logo_path, width=120)
+# with col_header_right:
+#     script_dir = os.path.dirname(os.path.abspath(__file__))
+#     logo_path = os.path.join(script_dir, "assets", "logo.png")
+#     if os.path.exists(logo_path):
+#         st.image(logo_path, width=120)
 
 # Sidebar layout
 st.sidebar.markdown("### 🇦🇪 System Control Panel")
-st.sidebar.info("Upload a document photo or choose a pre-loaded mock sample card to start processing.")
+# st.sidebar.info("Upload a document photo or choose a pre-loaded mock sample card to start processing.")
 
 # Document Upload Type Selection
 source_choice = st.sidebar.radio(
     "Select Document Source:",
-    ["Upload Custom Document", "Use Pre-loaded Mock Samples"]
+    ["Upload Custom Document"]
 )
 
 uploaded_file = None
@@ -127,29 +135,30 @@ sample_selection = None
 if source_choice == "Upload Custom Document":
     uploaded_file = st.sidebar.file_uploader(
         "Upload ID / License Image", 
-        type=["jpg", "jpeg", "png"],
+        type=["jpg", "jpeg", "png",],
         help="Supports JPG, JPEG, and PNG images of Emirates ID or Driving License."
     )
-else:
-    sample_selection = st.sidebar.selectbox(
-        "Select a Sample Document:",
-        ["Emirates ID (Mock Sample)", "Driving License (Mock Sample)"]
-    )
-    st.sidebar.success("💡 Sample documents are pre-loaded to show full OCR capability without using real personal IDs.")
+# else:
+#     sample_selection = st.sidebar.selectbox(
+#         "Select a Sample Document:",
+#         ["Emirates ID (Mock Sample)", "Driving License (Mock Sample)"]
+#     )
+#     st.sidebar.success("💡 Sample documents are pre-loaded to show full OCR capability without using real personal IDs.")
 
-# Sidebar Instructions & Tech Specs
-with st.sidebar.expander("🛠️ Technology Stack Specs", expanded=False):
-    st.markdown("""
-    - **Frontend:** Streamlit
-    - **OCR:** PaddleOCR (En)
-    - **Binarization:** OpenCV v4
-    - **Parsing:** Python Regular Expressions
-    - **Engine Core:** PaddlePaddle (CPU)
-    """)
+# # Sidebar Instructions & Tech Specs
+# with st.sidebar.expander("🛠️ Technology Stack Specs", expanded=False):
+#     st.markdown("""
+#     - **Frontend:** Streamlit
+#     - **OCR:** PaddleOCR (En)
+#     - **Binarization:** OpenCV v4
+#     - **Parsing:** Python Regular Expressions
+#     - **Engine Core:** PaddlePaddle (CPU)
+#     """)
 
 # Workspace Directories Configuration
-UPLOAD_DIR = "uae_ocr_project/uploads"
-OUTPUT_DIR = "uae_ocr_project/outputs"
+script_dir = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(script_dir, "uploads")
+OUTPUT_DIR = os.path.join(script_dir, "outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -163,17 +172,18 @@ if source_choice == "Upload Custom Document" and uploaded_file is not None:
     image_to_process = cv2.imread(saved_path)
     image_name_label = uploaded_file.name
     
-elif source_choice == "Use Pre-loaded Mock Samples":
-    if sample_selection == "Emirates ID (Mock Sample)":
-        sample_path = "uae_ocr_project/samples/emirates_id_sample.jpg"
-    else:
-        sample_path = "uae_ocr_project/samples/driving_license_sample.jpg"
+# elif source_choice == "Use Pre-loaded Mock Samples":
+#     script_dir = os.path.dirname(os.path.abspath(__file__))
+#     if sample_selection == "Emirates ID (Mock Sample)":
+#         sample_path = os.path.join(script_dir, "samples", "emirates_id_sample.jpg")
+#     else:
+#         sample_path = os.path.join(script_dir, "samples", "driving_license_sample.jpg")
         
-    if os.path.exists(sample_path):
-        image_to_process = cv2.imread(sample_path)
-        image_name_label = os.path.basename(sample_path)
-    else:
-        st.error(f"Sample asset not found at: {sample_path}")
+#     if os.path.exists(sample_path):
+#         image_to_process = cv2.imread(sample_path)
+#         image_name_label = os.path.basename(sample_path)
+#     else:
+#         st.error(f"Sample asset not found at: {sample_path}")
 
 # Main Layout split
 if image_to_process is not None:
@@ -184,10 +194,10 @@ if image_to_process is not None:
         st.subheader("📷 Loaded Document Viewer")
         # Convert BGR image to RGB for displaying correctly in Streamlit
         rgb_preview = cv2.cvtColor(image_to_process, cv2.COLOR_BGR2RGB)
-        st.image(rgb_preview, use_container_width=True, caption=f"Active Document: {image_name_label}")
+        st.image(rgb_preview, width='stretch', caption=f"Active Document: {image_name_label}")
         
         # Trigger Extraction Button
-        extract_button = st.button("🚀 Extract Identity Details", type="primary", use_container_width=True)
+        extract_button = st.button("🚀 Extract Identity Details", type="primary", width='stretch')
         st.markdown('</div>', unsafe_allow_html=True)
         
     with col_right:
@@ -246,15 +256,25 @@ if image_to_process is not None:
                             st.markdown(f'<div class="field-label">Issue Date</div><div class="field-value">{data_fields.get("issue_date") or "N/A"}</div>', unsafe_allow_html=True)
                             st.markdown(f'<div class="field-label">Expiry Date</div><div class="field-value">{data_fields.get("expiry_date") or "N/A"}</div>', unsafe_allow_html=True)
                     else:
-                        st.error("Identification failure: Standard labels not recognized. Please review OCR raw lines below.")
+                        st.warning(f"⚠️ Document identification inconclusive (confidence: {parsed_response.get('detection_confidence', 0):.1%})\n\n" + 
+                                  "This image may not be an Emirates ID or Driving License. Please:\n" +
+                                  "• Ensure the document is clearly visible\n" +
+                                  "• Check image quality (not blurry or too small)\n" +
+                                  "• Upload a clear photo of an **Emirates ID** or **Driving License**\n\n" +
+                                  "Review the OCR text below to see what was detected from the image.")
                     
                     # 6. JSON results viewer
                     with st.expander("📦 Structured JSON Response Output", expanded=True):
                         st.json(parsed_response)
                         
-                    # 7. Raw lines extracted (for debugging / review)
-                    with st.expander("📝 Raw OCR Lines Extracted", expanded=False):
-                        st.write(parsed_response.get("raw_text", []))
+                    # 7. Raw lines extracted (auto-open if detection failed)
+                    # should_expand_raw = not parsed_response["success"]
+                    # with st.expander("📝 Raw OCR Lines Extracted", expanded=should_expand_raw):
+                    #     if parsed_response.get("raw_text"):
+                    #         for i, text in enumerate(parsed_response["raw_text"], 1):
+                    #             st.write(f"**Line {i}:** {text}")
+                    #     else:
+                    #         st.info("No text detected in the image")
                         
                     # 8. Download JSON button
                     json_str = to_downloadable_json(parsed_response)
@@ -263,7 +283,7 @@ if image_to_process is not None:
                         data=json_str,
                         file_name=f"{os.path.splitext(image_name_label)[0]}_extracted.json",
                         mime="application/json",
-                        use_container_width=True
+                        width='stretch'
                     )
                     
                 except Exception as ex:
@@ -273,16 +293,16 @@ if image_to_process is not None:
             st.info("Click the 'Extract Identity Details' button on the left to execute OCR & parsing.")
             
         st.markdown('</div>', unsafe_allow_html=True)
-else:
-    # If no file is loaded yet
-    st.warning("⚠️ No document active. Please select a sample card or upload your own file using the sidebar panel.")
+# else:
+#     # If no file is loaded yet
+#     st.warning("⚠️ No document active. Please select a sample card or upload your own file using the sidebar panel.")
     
     # Beautiful landing placeholder
-    st.markdown("""
-    <div style="background-color: #F8FAFC; border: 2px dashed #CBD5E1; border-radius: 16px; padding: 60px; text-align: center;">
-        <h3 style="color: #64748B;">Ready to Extract UAE Documents</h3>
-        <p style="color: #94A3B8; max-width: 500px; margin: 10px auto;">
-            Our PaddleOCR-backed backend processes identity documents, cleans the visual layers, segments textual content, classifies headers, and formats matching key-value pairs into JSON schemas.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    # st.markdown("""
+    # <div style="background-color: #F8FAFC; border: 2px dashed #CBD5E1; border-radius: 16px; padding: 60px; text-align: center;">
+    #     <h3 style="color: #64748B;">Ready to Extract UAE Documents</h3>
+    #     <p style="color: #94A3B8; max-width: 500px; margin: 10px auto;">
+    #         Our PaddleOCR-backed backend processes identity documents, cleans the visual layers, segments textual content, classifies headers, and formats matching key-value pairs into JSON schemas.
+    #     </p>
+    # </div>
+    # """, unsafe_allow_html=True)

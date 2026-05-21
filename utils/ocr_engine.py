@@ -1,3 +1,12 @@
+import os
+
+# Disable oneDNN and MKLDNN CPU acceleration to prevent PIR framework attribute translation failures on Windows
+# These must be set BEFORE importing PaddleOCR/PaddlePaddle
+os.environ["FLAGS_use_onednn"] = "0"
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Force CPU-only inference
+
 import logging
 import numpy as np
 from paddleocr import PaddleOCR
@@ -16,17 +25,20 @@ class PaddleOCRSingleton:
     @classmethod
     def get_ocr_engine(cls) -> PaddleOCR:
         if cls._ocr_instance is None:
-            # Initialize PaddleOCR with required parameters
+            # Initialize PaddleOCR with speed optimizations
+            # Using only valid parameters for PaddleOCR v3.3+
             cls._ocr_instance = PaddleOCR(
-                use_angle_cls=True,
+                use_angle_cls=False,  # Disable angle detection for speed
                 lang='en',
-                show_log=False
+                enable_mkldnn=False
             )
         return cls._ocr_instance
 
 def extract_text(image_path_or_arr) -> list:
     """
     Performs OCR on an image and returns a list of extracted clean text lines.
+    Handles the new PaddleOCR v3.3+ result format which returns dictionaries
+    with 'rec_texts' and 'rec_scores' arrays.
     
     Args:
         image_path_or_arr: A file path (str) or preprocessed numpy image array (np.ndarray).
@@ -39,18 +51,53 @@ def extract_text(image_path_or_arr) -> list:
         
         # Run PaddleOCR on the image
         # If input is a path, PaddleOCR handles it. If input is a numpy array, it also handles it.
-        result = ocr_engine.ocr(image_path_or_arr, cls=True)
+        result = ocr_engine.ocr(image_path_or_arr)
         
         extracted_lines = []
-        if result and result[0]:
-            for line in result[0]:
-                text = line[1][0].strip()
-                confidence = float(line[1][1])
-                if text:
-                    extracted_lines.append({
-                        "text": text,
-                        "confidence": confidence
-                    })
+        
+        # Handle the NEW PaddleOCR v3.3+ result format
+        # Result is a list of page results, each is a dict with 'rec_texts', 'rec_scores', etc.
+        if result and isinstance(result, list):
+            for page_idx, page_result in enumerate(result):
+                if page_result and isinstance(page_result, dict):
+                    # Extract recognized texts and scores from the dictionary
+                    rec_texts = page_result.get('rec_texts', [])
+                    rec_scores = page_result.get('rec_scores', [])
+                    
+                    # Pair texts with their confidence scores
+                    if rec_texts:
+                        for text_idx, text in enumerate(rec_texts):
+                            try:
+                                text_str = str(text).strip()
+                                # Get corresponding score or default to 0.0
+                                confidence = float(rec_scores[text_idx]) if text_idx < len(rec_scores) else 0.0
+                                
+                                # Only add non-empty text with reasonable confidence
+                                if text_str and confidence > 0.1:
+                                    extracted_lines.append({
+                                        "text": text_str,
+                                        "confidence": confidence
+                                    })
+                            except (IndexError, ValueError, TypeError) as e:
+                                print(f"Warning: Could not parse text at index {text_idx}: {str(e)}")
+                                continue
+                elif page_result and isinstance(page_result, list):
+                    # Handle LEGACY PaddleOCR format (lines as list of [[coords], (text, confidence)])
+                    for line_idx, line in enumerate(page_result):
+                        try:
+                            if isinstance(line, (list, tuple)) and len(line) >= 2:
+                                text_info = line[1]
+                                if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
+                                    text = str(text_info[0]).strip()
+                                    confidence = float(text_info[1])
+                                    if text:
+                                        extracted_lines.append({
+                                            "text": text,
+                                            "confidence": confidence
+                                        })
+                        except (IndexError, ValueError, TypeError) as e:
+                            print(f"Warning: Could not parse legacy format line at {line_idx}: {str(e)}")
+                            continue
         
         return extracted_lines
     except Exception as e:
