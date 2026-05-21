@@ -127,6 +127,31 @@ def enhance_contrast(image: np.ndarray) -> np.ndarray:
     enhanced = clahe.apply(image)
     return enhanced
 
+def estimate_blur_score(image: np.ndarray) -> float:
+    """Estimate image sharpness; lower scores usually mean blurrier text."""
+    if image is None:
+        raise ValueError("Input image is None")
+
+    gray = to_grayscale(image)
+    return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+def upscale_for_ocr(image: np.ndarray, target_width: int = 1200, max_width: int = 1800) -> np.ndarray:
+    """Upscale smaller or blurry images before OCR to improve character detail."""
+    if image is None:
+        raise ValueError("Input image is None")
+
+    h, w = image.shape[:2]
+    if w <= 0 or h <= 0:
+        raise ValueError("Invalid image dimensions")
+
+    scale = target_width / float(w)
+    if scale < 1.0:
+        scale = 1.0
+
+    new_width = min(int(w * scale), max_width)
+    new_height = max(1, int(h * (new_width / float(w))))
+    return cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+
 def preprocess_for_ocr(image_path_or_arr, resize_width: int = 512) -> np.ndarray:
     """
     ULTRA-FAST preprocessing for OCR - speed optimized.
@@ -146,13 +171,21 @@ def preprocess_for_ocr(image_path_or_arr, resize_width: int = 512) -> np.ndarray
     else:
         image = image_path_or_arr
         
-    # Fastest possible: Direct resize
+    blur_score = estimate_blur_score(image)
     h, w = image.shape[:2]
-    new_h = int(resize_width * h / w)
-    # Use fastest interpolation
-    resized = cv2.resize(image, (resize_width, new_h), interpolation=cv2.INTER_LINEAR)
-    
-    # Convert to grayscale and back to 3-channel (required by PaddleOCR)
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+
+    # Low-resolution or blurry documents benefit from a larger OCR input size.
+    if blur_score < 90.0 or min(h, w) < 900:
+        resized = upscale_for_ocr(image, target_width=max(resize_width, 1200), max_width=1800)
+    else:
+        new_h = int(resize_width * h / w)
+        resized = cv2.resize(image, (resize_width, new_h), interpolation=cv2.INTER_AREA if resize_width < w else cv2.INTER_CUBIC)
+
+    # Convert to grayscale, then lightly enhance blurry text regions.
+    gray = to_grayscale(resized)
+    if blur_score < 90.0:
+        gray = enhance_contrast(gray)
+        gray = sharpen_image(gray)
+
     three_channel = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     return three_channel

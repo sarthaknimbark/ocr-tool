@@ -35,22 +35,8 @@ class PaddleOCRSingleton:
         return cls._ocr_instance
 
 def extract_text(image_path_or_arr) -> list:
-    """
-    Performs OCR on an image and returns a list of extracted clean text lines.
-    Handles the new PaddleOCR v3.3+ result format which returns dictionaries
-    with 'rec_texts' and 'rec_scores' arrays.
-    
-    Args:
-        image_path_or_arr: A file path (str) or preprocessed numpy image array (np.ndarray).
-        
-    Returns:
-        list: A list of dicts containing text and confidence, e.g. [{"text": "...", "confidence": 0.98}]
-    """
     try:
         ocr_engine = PaddleOCRSingleton.get_ocr_engine()
-        
-        # Run PaddleOCR on the image
-        # If input is a path, PaddleOCR handles it. If input is a numpy array, it also handles it.
         result = ocr_engine.ocr(image_path_or_arr)
         
         extracted_lines = []

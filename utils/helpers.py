@@ -1,20 +1,10 @@
 import os
+import re
 import json
 import uuid
-import re
 
 def save_uploaded_file(uploaded_file, upload_dir: str = "uploads") -> str:
-    """
-    Saves a Streamlit uploaded file to a specified directory with a unique UUID prefix
-    to avoid name collisions.
-    
-    Args:
-        uploaded_file: The Streamlit UploadedFile object.
-        upload_dir (str): Relative or absolute path to the directory to save files in.
-        
-    Returns:
-        str: Absolute or relative path to the saved file.
-    """
+
     if not os.path.exists(upload_dir):
         os.makedirs(upload_dir, exist_ok=True)
         
@@ -31,15 +21,6 @@ def save_uploaded_file(uploaded_file, upload_dir: str = "uploads") -> str:
     return file_path
 
 def clean_ocr_text(text: str) -> str:
-    """
-    Helper function to clean raw OCR text. Normalizes spaces, symbols, and line breaks.
-    
-    Args:
-        text (str): Input text block.
-        
-    Returns:
-        str: Cleaned text.
-    """
     if not text:
         return ""
     # Replace multiple spaces with single space
@@ -49,17 +30,7 @@ def clean_ocr_text(text: str) -> str:
     return cleaned.strip()
 
 def save_json_output(data: dict, filename: str, output_dir: str = "outputs") -> str:
-    """
-    Saves parsed JSON dict to the outputs directory.
     
-    Args:
-        data (dict): Parsed structured data dictionary.
-        filename (str): Base name for the JSON output file.
-        output_dir (str): Directory where JSON outputs are stored.
-        
-    Returns:
-        str: Path where JSON is saved.
-    """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
         
@@ -74,13 +45,4 @@ def save_json_output(data: dict, filename: str, output_dir: str = "outputs") -> 
     return save_path
 
 def to_downloadable_json(data: dict) -> str:
-    """
-    Converts data dictionary into a pretty-printed JSON string suitable for downloads.
-    
-    Args:
-        data (dict): Data dictionary.
-        
-    Returns:
-        str: JSON formatted string.
-    """
     return json.dumps(data, indent=4, ensure_ascii=False)

@@ -16,6 +16,42 @@ def clean_arabic_and_special_chars(text: str) -> str:
     clean_text = re.sub(r'\s+', ' ', clean_text).strip()
     return clean_text
 
+def _normalize_for_detection(text: str) -> str:
+    if not text:
+        return ""
+    normalized = text.lower().replace("<", " ").replace("|", " ")
+    normalized = re.sub(r'[^a-z0-9\s\-\/\.:]', ' ', normalized)
+    return re.sub(r'\s+', ' ', normalized).strip()
+
+def _unique_preserving_order(values: list) -> list:
+    seen = set()
+    unique_values = []
+    for value in values:
+        if value and value not in seen:
+            unique_values.append(value)
+            seen.add(value)
+    return unique_values
+
+def _extract_mrz_name(raw_text: str) -> str:
+    if not raw_text or "<<" not in raw_text:
+        return ""
+    cleaned = re.sub(r'<+', ' ', raw_text)
+    cleaned = re.sub(r'[^A-Za-z\s]', ' ', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    words = cleaned.split()
+    if len(words) >= 2:
+        return " ".join(words[:4]).upper()
+    return ""
+
+def _extract_long_digit_sequence(text: str) -> str:
+    digits_only = re.sub(r'\D', '', text)
+    if len(digits_only) >= 15:
+        return digits_only
+    candidates = re.findall(r'\b\d{15,16}\b', text)
+    if candidates:
+        return max(candidates, key=len)
+    return ""
+
 def extract_dates(text: str) -> list:
     """
     Extracts all dates matching DD/MM/YYYY format from the text.
@@ -112,7 +148,8 @@ def detect_document_type(raw_lines: list) -> tuple:
     Returns:
         tuple: (document_type, confidence_score) where confidence is 0.0-1.0
     """
-    combined_text = " ".join([line["text"].lower() for line in raw_lines])
+    normalized_lines = [_normalize_for_detection(line["text"]) for line in raw_lines if line.get("text")]
+    combined_text = " ".join(normalized_lines)
     
     # Emirates ID keywords
     eid_keywords = [
@@ -126,18 +163,25 @@ def detect_document_type(raw_lines: list) -> tuple:
         "lic no", "traffic code", "license no"
     ]
     
-    # Check for driving license first
-    if any(keyword in combined_text for keyword in dl_keywords):
+    # Check for driving license first, including noisy OCR variants like "driving lie"
+    if any(keyword in combined_text for keyword in dl_keywords) or re.search(r'\bdriving\b.{0,20}\b(?:lic(?:en(?:se)?)?|lie|licence)\b', combined_text):
         return ("Driving License", 0.95)
         
     # Check for Emirates ID
-    if any(keyword in combined_text for keyword in eid_keywords):
+    if any(keyword in combined_text for keyword in eid_keywords) or re.search(r'\b(?:united arab emirates|resident identity card|emirates identity|identity card)\b', combined_text):
         return ("Emirates ID", 0.95)
         
     # Regex checks for EID number pattern
     eid_pattern = r'784[- ]?\d{4}[- ]?\d{7}[- ]?\d'
     if re.search(eid_pattern, combined_text):
         return ("Emirates ID", 0.90)
+
+    # Fallbacks for heavily mangled OCR text
+    if re.search(r'\bdriving\b', combined_text) and re.search(r'\b(?:lic|lie|no|issue|expiry)\b', combined_text):
+        return ("Driving License", 0.78)
+
+    if re.search(r'\b(?:resident|identity|emirates|united)\b', combined_text):
+        return ("Emirates ID", 0.72)
         
     # Default fallback
     return ("Unknown", 0.0)
@@ -167,33 +211,41 @@ def parse_emirates_id(raw_lines: list) -> dict:
         "expiry_date": ""
     }
     
-    lines = [clean_arabic_and_special_chars(line["text"]) for line in raw_lines]
-    # Filter out empty or whitespace-only lines
+    raw_text_lines = [line.get("text", "") for line in raw_lines]
+    lines = [clean_arabic_and_special_chars(text) for text in raw_text_lines]
     lines = [l for l in lines if l]
     
     combined_text = " ".join(lines)
     
     # 1. Extract ID Number (784-YYYY-XXXXXXX-Z)
-    id_pattern = r'\b(784[- ]?\d{4}[- ]?\d{7}[- ]?\d)\b'
-    id_match = re.search(id_pattern, combined_text)
-    if id_match:
-        data["id_number"] = id_match.group(1).replace(" ", "-") # Standardize format with dashes
-    else:
-        # Fallback if hyphens are missing and it's a sequence of 15 digits
-        fallback_pattern = r'\b(784\d{12})\b'
-        fallback_match = re.search(fallback_pattern, combined_text)
-        if fallback_match:
-            raw_digits = fallback_match.group(1)
-            data["id_number"] = f"{raw_digits[0:3]}-{raw_digits[3:7]}-{raw_digits[7:14]}-{raw_digits[14]}"
+    id_patterns = [
+        r'\b(784[- ]?\d{4}[- ]?\d{7}[- ]?\d)\b',
+        r'\b(78\d{13,14})\b',
+        r'\b(7\d{14,15})\b',
+    ]
+    for pattern in id_patterns:
+        id_match = re.search(pattern, combined_text)
+        if id_match:
+            raw_digits = re.sub(r'\D', '', id_match.group(1))
+            if len(raw_digits) == 15:
+                data["id_number"] = f"{raw_digits[0:3]}-{raw_digits[3:7]}-{raw_digits[7:14]}-{raw_digits[14]}"
+            else:
+                data["id_number"] = id_match.group(1).replace(" ", "-")
+            break
+
+    if not data["id_number"]:
+        for raw_text in raw_text_lines:
+            digits = _extract_long_digit_sequence(raw_text)
+            if digits:
+                data["id_number"] = digits
+                break
             
     # 2. Extract Dates (Birth and Expiry)
     all_dates = []
     for line in lines:
         all_dates.extend(extract_dates(line))
         
-    # Remove duplicates but keep order
-    seen = set()
-    all_dates = [x for x in all_dates if not (x in seen or seen.add(x))]
+    all_dates = _unique_preserving_order(all_dates)
     
     # Classify dates based on chronological order
     date_classification = classify_dates(all_dates)
@@ -274,6 +326,13 @@ def parse_emirates_id(raw_lines: list) -> dict:
                 data["name"] = line_clean
                 break
 
+    if not data["name"]:
+        for raw_text in raw_text_lines:
+            mrz_name = _extract_mrz_name(raw_text)
+            if mrz_name:
+                data["name"] = mrz_name
+                break
+
     # 4. Extract Nationality
     for i, line in enumerate(lines):
         if "nationality" in line.lower() or "national" in line.lower():
@@ -283,6 +342,10 @@ def parse_emirates_id(raw_lines: list) -> dict:
             nat_candidate = re.sub(r'[^a-zA-Z\s]', '', nat_candidate).strip()
             if len(nat_candidate) > 3 and not nat_candidate.lower() in ["card", "identity"]:
                 data["nationality"] = nat_candidate
+                break
+            trailing_match = re.search(r'([A-Z]{3,})\s*$', line)
+            if trailing_match:
+                data["nationality"] = trailing_match.group(1)
                 break
             # Check next line
             elif i + 1 < len(lines):
@@ -342,24 +405,21 @@ def parse_driving_license(raw_lines: list) -> dict:
         "expiry_date": ""
     }
     
-    lines = [clean_arabic_and_special_chars(line["text"]) for line in raw_lines]
+    raw_text_lines = [line.get("text", "") for line in raw_lines]
+    lines = [clean_arabic_and_special_chars(text) for text in raw_text_lines]
     lines = [l for l in lines if l]
     combined_text = " ".join(lines)
     
     # 1. Extract License Number - More aggressive search
-    license_pattern = r'(?i)(?:lic(?:ense)?\.?\s*no\.?|lic\s*#|no\.?)\s*[:\-\s]*([0-9]+)'
-    license_match = re.search(license_pattern, combined_text)
-    if license_match:
-        data["license_number"] = license_match.group(1)
-    else:
-        # Fallback: Find any 7-9 digit number (typical license format)
-        all_numbers = re.findall(r'\b(\d{7,9})\b', combined_text)
-        # Prefer the first one that's not in dates
-        for num in all_numbers:
-            if num not in combined_text[:combined_text.find(num)-10:combined_text.find(num)+10]:
-                data["license_number"] = num
-                break
-        if not data["license_number"] and all_numbers:
+    for raw_text in raw_text_lines:
+        code_match = re.search(r'\b([A-Z]{2,}\d{3,}|\d{3,}[A-Z]{1,}\d{2,})\b', raw_text)
+        if code_match:
+            data["license_number"] = code_match.group(1)
+            break
+
+    if not data["license_number"]:
+        all_numbers = re.findall(r'\b(\d{6,10})\b', combined_text)
+        if all_numbers:
             data["license_number"] = all_numbers[0]
             
     # 2. Extract Dates (Birth, Issue, Expiry)
@@ -367,8 +427,7 @@ def parse_driving_license(raw_lines: list) -> dict:
     for line in lines:
         all_dates.extend(extract_dates(line))
         
-    seen = set()
-    all_dates = [x for x in all_dates if not (x in seen or seen.add(x))]
+    all_dates = _unique_preserving_order(all_dates)
     
     # Classify dates chronologically
     date_classification = classify_dates(all_dates)
@@ -454,13 +513,26 @@ def parse_driving_license(raw_lines: list) -> dict:
                 data["name"] = line_clean
                 break
 
+    if not data["name"]:
+        for raw_text in raw_text_lines:
+            mrz_name = _extract_mrz_name(raw_text)
+            if mrz_name:
+                data["name"] = mrz_name
+                break
+
     # 4. Extract Nationality
     for i, line in enumerate(lines):
-        if "nationality" in line.lower() or "national" in line.lower():
+        line_lower = line.lower()
+        if "nationality" in line_lower or "national" in line_lower or re.search(r'\bnati\w*', line_lower):
             nat_candidate = re.sub(r'(?i)nationality|national|[:/]', '', line).strip()
+            nat_candidate = re.sub(r'(?i)nati\w*', '', nat_candidate).strip()
             nat_candidate = re.sub(r'[^a-zA-Z\s]', '', nat_candidate).strip()
             if len(nat_candidate) > 3 and not nat_candidate.lower() in ["card", "license"]:
                 data["nationality"] = nat_candidate
+                break
+            trailing_match = re.search(r'([A-Z]{3,})\s*$', line)
+            if trailing_match:
+                data["nationality"] = trailing_match.group(1)
                 break
             elif i + 1 < len(lines):
                 next_line_clean = re.sub(r'[^a-zA-Z\s]', '', lines[i+1]).strip()
