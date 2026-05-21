@@ -19,18 +19,88 @@ def clean_arabic_and_special_chars(text: str) -> str:
 def extract_dates(text: str) -> list:
     """
     Extracts all dates matching DD/MM/YYYY format from the text.
+    Handles dates with or without spaces/separators.
     """
-    # Matches dates like 01/01/1990, 15-12-2025, 23.08.1994
-    pattern = r'\b(\d{2}[/\-.]\d{2}[/\-.]\d{4})\b'
+    # Match dates like 01/01/1990, 15-12-2025, 23.08.1994, and concatenated like "Birth04/10/1989"
+    pattern = r'(\d{2}[/\-.]\d{2}[/\-.]\d{4})'
     matches = re.findall(pattern, text)
     
     # Normalize date separators to '/'
     normalized_dates = []
     for date_str in matches:
         normalized = date_str.replace('-', '/').replace('.', '/')
-        normalized_dates.append(normalized)
+        if normalized not in normalized_dates:  # Avoid duplicates
+            normalized_dates.append(normalized)
         
     return normalized_dates
+
+def extract_date_after_label(text: str, label: str) -> str:
+    """
+    Extract date that appears right after a specific label.
+    E.g., "Date of Birth04/10/1989" -> "04/10/1989"
+    """
+    # Look for label followed by optional spaces/punctuation, then a date
+    pattern = f'{re.escape(label)}[\\s/:\\-.:,]*?(\\d{{2}}[/\\-.:]\\d{{2}}[/\\-.:]\\d{{4}})'
+    match = re.search(pattern, text, re.IGNORECASE)
+    if match:
+        date_str = match.group(1)
+        return date_str.replace('-', '/').replace('.', '/').replace(':', '/')
+    return ""
+
+def classify_dates(dates: list, line_labels: list = None) -> dict:
+    """
+    Classifies dates into DOB, Issue, and Expiry based on context and proximity to labels.
+    
+    Args:
+        dates: List of date strings (DD/MM/YYYY format)
+        line_labels: List of lowercase line text for label matching
+    
+    Returns:
+        dict with keys: 'date_of_birth', 'issue_date', 'expiry_date'
+    """
+    result = {
+        'date_of_birth': '',
+        'issue_date': '',
+        'expiry_date': '',
+        
+        
+    }
+    
+    if not dates:
+        return result
+    
+    # Try to parse dates chronologically
+    try:
+        parsed = []
+        for d in dates:
+            try:
+                dt = datetime.datetime.strptime(d, "%d/%m/%Y")
+                parsed.append((d, dt))
+            except:
+                pass
+        
+        if not parsed:
+            return result
+            
+        # Sort by datetime
+        parsed.sort(key=lambda x: x[1])
+        
+        # Heuristic: DOB is oldest, Expiry is most recent
+        if len(parsed) >= 1:
+            result['date_of_birth'] = parsed[0][0]
+        if len(parsed) >= 2:
+            result['expiry_date'] = parsed[-1][0]
+        if len(parsed) >= 3:
+            # Issue is typically between DOB and Expiry
+            result['issue_date'] = parsed[1][0]
+        elif len(parsed) == 2:
+            # Only 2 dates: DOB and Expiry, no issue date
+            result['date_of_birth'] = parsed[0][0]
+            result['expiry_date'] = parsed[1][0]
+    except Exception:
+        pass
+    
+    return result
 
 def detect_document_type(raw_lines: list) -> tuple:
     """
@@ -125,56 +195,33 @@ def parse_emirates_id(raw_lines: list) -> dict:
     seen = set()
     all_dates = [x for x in all_dates if not (x in seen or seen.add(x))]
     
-    # Proximity matching for Date of Birth & Expiry Date
-    dob_found = False
-    expiry_found = False
+    # Classify dates based on chronological order
+    date_classification = classify_dates(all_dates)
+    data["date_of_birth"] = date_classification.get('date_of_birth', '')
+    data["expiry_date"] = date_classification.get('expiry_date', '')
     
+    # Override with label-based matches if labels found
     for i, line in enumerate(lines):
         line_lower = line.lower()
         # Find Date of Birth
         if "birth" in line_lower or "dob" in line_lower or "date of b" in line_lower:
-            # Check same line first
             dates_on_line = extract_dates(line)
             if dates_on_line:
                 data["date_of_birth"] = dates_on_line[0]
-                dob_found = True
-            # Check next line
             elif i + 1 < len(lines):
                 dates_next_line = extract_dates(lines[i+1])
                 if dates_next_line:
                     data["date_of_birth"] = dates_next_line[0]
-                    dob_found = True
                     
         # Find Expiry Date
         if "expiry" in line_lower or "exp" in line_lower or "valid" in line_lower:
             dates_on_line = extract_dates(line)
             if dates_on_line:
                 data["expiry_date"] = dates_on_line[0]
-                expiry_found = True
             elif i + 1 < len(lines):
                 dates_next_line = extract_dates(lines[i+1])
                 if dates_next_line:
                     data["expiry_date"] = dates_next_line[0]
-                    expiry_found = True
-
-    # Smart fallback for Dates if proximity search failed
-    if all_dates:
-        # Sort dates chronologically to assign DOB (earliest) and Expiry (latest/future)
-        try:
-            parsed_dates = [datetime.datetime.strptime(d, "%d/%m/%Y") for d in all_dates]
-            parsed_dates.sort()
-            
-            if not dob_found and parsed_dates:
-                data["date_of_birth"] = parsed_dates[0].strftime("%d/%m/%Y")
-            if not expiry_found and len(parsed_dates) > 1:
-                # Typically the furthest date is the expiry date
-                data["expiry_date"] = parsed_dates[-1].strftime("%d/%m/%Y")
-        except Exception:
-            # If date parsing fails, assign by order in text as a fallback
-            if not dob_found and len(all_dates) >= 1:
-                data["date_of_birth"] = all_dates[0]
-            if not expiry_found and len(all_dates) >= 2:
-                data["expiry_date"] = all_dates[1]
                 
     # 3. Extract Name
     # EID names are usually after "Name:" or "Name" label
@@ -323,10 +370,13 @@ def parse_driving_license(raw_lines: list) -> dict:
     seen = set()
     all_dates = [x for x in all_dates if not (x in seen or seen.add(x))]
     
-    dob_found = False
-    issue_found = False
-    expiry_found = False
+    # Classify dates chronologically
+    date_classification = classify_dates(all_dates)
+    data["date_of_birth"] = date_classification.get('date_of_birth', '')
+    data["issue_date"] = date_classification.get('issue_date', '')
+    data["expiry_date"] = date_classification.get('expiry_date', '')
     
+    # Override with label-based matches for better accuracy
     for i, line in enumerate(lines):
         line_lower = line.lower()
         # Find Date of Birth
@@ -334,61 +384,30 @@ def parse_driving_license(raw_lines: list) -> dict:
             dates = extract_dates(line)
             if dates:
                 data["date_of_birth"] = dates[0]
-                dob_found = True
             elif i + 1 < len(lines):
                 dates_next = extract_dates(lines[i+1])
                 if dates_next:
                     data["date_of_birth"] = dates_next[0]
-                    dob_found = True
                     
         # Find Issue Date
         if "issue" in line_lower or "issued" in line_lower:
             dates = extract_dates(line)
             if dates:
                 data["issue_date"] = dates[0]
-                issue_found = True
             elif i + 1 < len(lines):
                 dates_next = extract_dates(lines[i+1])
                 if dates_next:
                     data["issue_date"] = dates_next[0]
-                    issue_found = True
                     
         # Find Expiry Date
         if "expiry" in line_lower or "exp" in line_lower or "valid" in line_lower or "expires" in line_lower:
             dates = extract_dates(line)
             if dates:
                 data["expiry_date"] = dates[0]
-                expiry_found = True
             elif i + 1 < len(lines):
                 dates_next = extract_dates(lines[i+1])
                 if dates_next:
                     data["expiry_date"] = dates_next[0]
-                    expiry_found = True
-
-    # Chronological sort fallback for DL Dates (DOB is earliest, Issue is middle, Expiry is latest)
-    if all_dates and (not dob_found or not issue_found or not expiry_found):
-        try:
-            parsed_dates = [datetime.datetime.strptime(d, "%d/%m/%Y") for d in all_dates]
-            parsed_dates.sort()
-            
-            if not dob_found and parsed_dates:
-                data["date_of_birth"] = parsed_dates[0].strftime("%d/%m/%Y")
-            if not expiry_found and len(parsed_dates) > 1:
-                data["expiry_date"] = parsed_dates[-1].strftime("%d/%m/%Y")
-            if not issue_found:
-                # Find a date in the middle
-                middle_dates = [d for d in parsed_dates if d != parsed_dates[0] and d != parsed_dates[-1]]
-                if middle_dates:
-                    data["issue_date"] = middle_dates[0].strftime("%d/%m/%Y")
-                elif len(parsed_dates) >= 3:
-                    data["issue_date"] = parsed_dates[1].strftime("%d/%m/%Y")
-        except Exception:
-            if not dob_found and len(all_dates) >= 1:
-                data["date_of_birth"] = all_dates[0]
-            if not issue_found and len(all_dates) >= 2:
-                data["issue_date"] = all_dates[1]
-            if not expiry_found and len(all_dates) >= 3:
-                data["expiry_date"] = all_dates[2]
 
     # 3. Extract Name - Check for "Name" or "Holder" label (with or without colon)
     name_extracted = False

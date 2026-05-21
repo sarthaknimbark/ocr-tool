@@ -1,11 +1,5 @@
 import os
 import sys
-
-os.environ["FLAGS_use_onednn"] = "0"
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Force CPU-only mode
-
 import cv2
 import json
 import numpy as np
@@ -106,6 +100,90 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Helper function to display document results
+def _display_document_results(parsed_response, doc_name):
+    """Display extraction results for a document"""
+    # Success notifications
+    if parsed_response["success"]:
+        st.success(f"Success! Document identified as: **{parsed_response['document_type']}**")
+    else:
+        st.warning("OCR complete, but could not determine the exact document type. Showing raw text.")
+    
+    # Display structured information
+    doc_type = parsed_response["document_type"]
+    data_fields = parsed_response["data"]
+    
+    if doc_type == "Emirates ID" and parsed_response["success"]:
+        st.markdown("###Emirates ID Information")
+        
+        col_e1, col_e2 = st.columns(2)
+        with col_e1:
+            st.markdown(f'<div class="field-label">ID Number</div><div class="field-value">{data_fields.get("id_number") or "N/A"}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">Full Name</div><div class="field-value">{data_fields.get("name") or "N/A"}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">Nationality</div><div class="field-value">{data_fields.get("nationality") or "N/A"}</div>', unsafe_allow_html=True)
+        with col_e2:
+            st.markdown(f'<div class="field-label">Gender</div><div class="field-value">{data_fields.get("gender") or "N/A"}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">Date of Birth</div><div class="field-value">{data_fields.get("date_of_birth") or "N/A"}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">Expiry Date</div><div class="field-value">{data_fields.get("expiry_date") or "N/A"}</div>', unsafe_allow_html=True)
+            
+    elif doc_type == "Driving License" and parsed_response["success"]:
+        st.markdown("###Driving License Information")
+        
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            st.markdown(f'<div class="field-label">License Number</div><div class="field-value">{data_fields.get("license_number") or "N/A"}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">Full Name</div><div class="field-value">{data_fields.get("name") or "N/A"}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">Nationality</div><div class="field-value">{data_fields.get("nationality") or "N/A"}</div>', unsafe_allow_html=True)
+        with col_d2:
+            st.markdown(f'<div class="field-label">Date of Birth</div><div class="field-value">{data_fields.get("date_of_birth") or "N/A"}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">Issue Date</div><div class="field-value">{data_fields.get("issue_date") or "N/A"}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="field-label">Expiry Date</div><div class="field-value">{data_fields.get("expiry_date") or "N/A"}</div>', unsafe_allow_html=True)
+    else:
+        st.warning(f" Document identification inconclusive (confidence: {parsed_response.get('detection_confidence', 0):.1%})\n\n" + 
+                  "This image may not be an Emirates ID or Driving License. Please:\n" +
+                  "• Ensure the document is clearly visible\n" +
+                  "• Check image quality (not blurry or too small)\n" +
+                  "• Upload a clear photo of an **Emirates ID** or **Driving License**\n\n" +
+                  "Review the OCR text below to see what was detected from the image.")
+    
+    # JSON results viewer
+    with st.expander(" Structured JSON Response Output", expanded=False):
+        st.json(parsed_response)
+    
+    # Download JSON button
+    json_str = to_downloadable_json(parsed_response)
+    st.download_button(
+        label=" Download Structured JSON",
+        data=json_str,
+        file_name=f"{os.path.splitext(doc_name)[0]}_extracted.json",
+        mime="application/json",
+        use_container_width=True
+    )
+
+def _combine_documents_response(all_results: list) -> dict:
+    """Combine multiple document extraction results into a single response"""
+    combined = {
+        "success": all(r["success"] for r in all_results),
+        "documents": all_results,
+        "summary": {
+            "total_documents": len(all_results),
+            "documents_processed": sum(1 for r in all_results if r["success"]),
+            "extraction_details": []
+        }
+    }
+    
+    # Build summary from all documents
+    for result in all_results:
+        summary_item = {
+            "document_type": result["document_type"],
+            "success": result["success"],
+            "confidence": result["detection_confidence"],
+            "data": result["data"]
+        }
+        combined["summary"]["extraction_details"].append(summary_item)
+    
+    return combined
+
 # Layout: Main columns
 col_header_left, col_header_right = st.columns([4, 1])
 
@@ -120,7 +198,7 @@ with col_header_left:
 #         st.image(logo_path, width=120)
 
 # Sidebar layout
-st.sidebar.markdown("### 🇦🇪 System Control Panel")
+st.sidebar.markdown("### System Control Panel")
 # st.sidebar.info("Upload a document photo or choose a pre-loaded mock sample card to start processing.")
 
 # Document Upload Type Selection
@@ -133,27 +211,16 @@ uploaded_file = None
 sample_selection = None
 
 if source_choice == "Upload Custom Document":
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload ID / License Image", 
-        type=["jpg", "jpeg", "png",],
-        help="Supports JPG, JPEG, and PNG images of Emirates ID or Driving License."
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload ID / License Images (Up to 2 documents)", 
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        help="Upload up to 2 documents (Emirates ID and/or Driving License). Supports JPG, JPEG, and PNG."
     )
-# else:
-#     sample_selection = st.sidebar.selectbox(
-#         "Select a Sample Document:",
-#         ["Emirates ID (Mock Sample)", "Driving License (Mock Sample)"]
-#     )
-#     st.sidebar.success("💡 Sample documents are pre-loaded to show full OCR capability without using real personal IDs.")
-
-# # Sidebar Instructions & Tech Specs
-# with st.sidebar.expander("🛠️ Technology Stack Specs", expanded=False):
-#     st.markdown("""
-#     - **Frontend:** Streamlit
-#     - **OCR:** PaddleOCR (En)
-#     - **Binarization:** OpenCV v4
-#     - **Parsing:** Python Regular Expressions
-#     - **Engine Core:** PaddlePaddle (CPU)
-#     """)
+    # Limit to 2 files
+    if len(uploaded_files) > 2:
+        st.sidebar.warning("Please upload maximum 2 documents")
+        uploaded_files = uploaded_files[:2]
 
 # Workspace Directories Configuration
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -162,147 +229,112 @@ OUTPUT_DIR = os.path.join(script_dir, "outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Core logic to load and resolve target image
-image_to_process = None
-image_name_label = ""
+# Core logic to load and resolve target images
+processed_documents = []
 
-if source_choice == "Upload Custom Document" and uploaded_file is not None:
-    # Save the file using the helper
-    saved_path = save_uploaded_file(uploaded_file, UPLOAD_DIR)
-    image_to_process = cv2.imread(saved_path)
-    image_name_label = uploaded_file.name
-    
-# elif source_choice == "Use Pre-loaded Mock Samples":
-#     script_dir = os.path.dirname(os.path.abspath(__file__))
-#     if sample_selection == "Emirates ID (Mock Sample)":
-#         sample_path = os.path.join(script_dir, "samples", "emirates_id_sample.jpg")
-#     else:
-#         sample_path = os.path.join(script_dir, "samples", "driving_license_sample.jpg")
-        
-#     if os.path.exists(sample_path):
-#         image_to_process = cv2.imread(sample_path)
-#         image_name_label = os.path.basename(sample_path)
-#     else:
-#         st.error(f"Sample asset not found at: {sample_path}")
+if source_choice == "Upload Custom Document" and uploaded_files:
+    # Process each uploaded file
+    for uploaded_file in uploaded_files:
+        saved_path = save_uploaded_file(uploaded_file, UPLOAD_DIR)
+        image = cv2.imread(saved_path)
+        processed_documents.append({
+            "name": uploaded_file.name,
+            "image": image,
+            "path": saved_path
+        })
 
-# Main Layout split
-if image_to_process is not None:
-    col_left, col_right = st.columns([1, 1])
+# Display documents and extraction results
+if processed_documents:
+    # Show document previews and extract button
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader(f"Loaded Documents ({len(processed_documents)} file{'s' if len(processed_documents) > 1 else ''})")
     
-    with col_left:
+    preview_cols = st.columns(len(processed_documents))
+    for idx, doc in enumerate(processed_documents):
+        with preview_cols[idx]:
+            rgb_preview = cv2.cvtColor(doc["image"], cv2.COLOR_BGR2RGB)
+            st.image(rgb_preview, use_column_width=True, caption=doc["name"])
+    
+    # Extract button
+    extract_button = st.button("Extract Details from All Documents", type="primary", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Process extraction if button clicked
+    if extract_button:
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("📷 Loaded Document Viewer")
-        # Convert BGR image to RGB for displaying correctly in Streamlit
-        rgb_preview = cv2.cvtColor(image_to_process, cv2.COLOR_BGR2RGB)
-        st.image(rgb_preview, width='stretch', caption=f"Active Document: {image_name_label}")
+        st.subheader("### Combined Extraction Results")
         
-        # Trigger Extraction Button
-        extract_button = st.button("🚀 Extract Identity Details", type="primary", width='stretch')
-        st.markdown('</div>', unsafe_allow_html=True)
+        all_extraction_results = []
         
-    with col_right:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("⚡ Parsed Information Hub")
-        
-        if extract_button:
-            # Step-by-step pipeline with loading spinner
-            with st.spinner("Processing: Image optimization, running OCR engine & parsing text..."):
+        # Process all documents in parallel (sequential for now, can be parallelized)
+        with st.spinner("Processing all documents..."):
+            for doc in processed_documents:
                 try:
-                    # 1. Preprocess the image
-                    preprocessed_img = preprocess_for_ocr(image_to_process)
-                    
-                    # 2. Extract Text via PaddleOCR
+                    preprocessed_img = preprocess_for_ocr(doc["image"])
                     raw_ocr_results = extract_text(preprocessed_img)
-                    
-                    # 3. Parse and structure the data
                     parsed_response = parse_ocr_text(raw_ocr_results)
-                    
-                    # 4. Save JSON response in outputs directory
-                    saved_json_path = save_json_output(parsed_response, image_name_label, OUTPUT_DIR)
-                    
-                    # Success notifications
-                    if parsed_response["success"]:
-                        st.success(f"Success! Document identified as: **{parsed_response['document_type']}**")
-                    else:
-                        st.warning("OCR complete, but could not determine the exact document type. Showing raw text.")
-                    
-                    # 5. Display structured table/view of parsed information
-                    doc_type = parsed_response["document_type"]
-                    data_fields = parsed_response["data"]
-                    
-                    if doc_type == "Emirates ID" and parsed_response["success"]:
-                        st.markdown("### 🇦🇪 Emirates ID Information")
-                        
-                        col_e1, col_e2 = st.columns(2)
-                        with col_e1:
-                            st.markdown(f'<div class="field-label">ID Number</div><div class="field-value">{data_fields.get("id_number") or "N/A"}</div>', unsafe_allow_html=True)
-                            st.markdown(f'<div class="field-label">Full Name</div><div class="field-value">{data_fields.get("name") or "N/A"}</div>', unsafe_allow_html=True)
-                            st.markdown(f'<div class="field-label">Nationality</div><div class="field-value">{data_fields.get("nationality") or "N/A"}</div>', unsafe_allow_html=True)
-                        with col_e2:
-                            st.markdown(f'<div class="field-label">Gender</div><div class="field-value">{data_fields.get("gender") or "N/A"}</div>', unsafe_allow_html=True)
-                            st.markdown(f'<div class="field-label">Date of Birth</div><div class="field-value">{data_fields.get("date_of_birth") or "N/A"}</div>', unsafe_allow_html=True)
-                            st.markdown(f'<div class="field-label">Expiry Date</div><div class="field-value">{data_fields.get("expiry_date") or "N/A"}</div>', unsafe_allow_html=True)
-                            
-                    elif doc_type == "Driving License" and parsed_response["success"]:
-                        st.markdown("### 🚗 Driving License Information")
-                        
-                        col_d1, col_d2 = st.columns(2)
-                        with col_d1:
-                            st.markdown(f'<div class="field-label">License Number</div><div class="field-value">{data_fields.get("license_number") or "N/A"}</div>', unsafe_allow_html=True)
-                            st.markdown(f'<div class="field-label">Full Name</div><div class="field-value">{data_fields.get("name") or "N/A"}</div>', unsafe_allow_html=True)
-                            st.markdown(f'<div class="field-label">Nationality</div><div class="field-value">{data_fields.get("nationality") or "N/A"}</div>', unsafe_allow_html=True)
-                        with col_d2:
-                            st.markdown(f'<div class="field-label">Date of Birth</div><div class="field-value">{data_fields.get("date_of_birth") or "N/A"}</div>', unsafe_allow_html=True)
-                            st.markdown(f'<div class="field-label">Issue Date</div><div class="field-value">{data_fields.get("issue_date") or "N/A"}</div>', unsafe_allow_html=True)
-                            st.markdown(f'<div class="field-label">Expiry Date</div><div class="field-value">{data_fields.get("expiry_date") or "N/A"}</div>', unsafe_allow_html=True)
-                    else:
-                        st.warning(f"⚠️ Document identification inconclusive (confidence: {parsed_response.get('detection_confidence', 0):.1%})\n\n" + 
-                                  "This image may not be an Emirates ID or Driving License. Please:\n" +
-                                  "• Ensure the document is clearly visible\n" +
-                                  "• Check image quality (not blurry or too small)\n" +
-                                  "• Upload a clear photo of an **Emirates ID** or **Driving License**\n\n" +
-                                  "Review the OCR text below to see what was detected from the image.")
-                    
-                    # 6. JSON results viewer
-                    with st.expander("📦 Structured JSON Response Output", expanded=True):
-                        st.json(parsed_response)
-                        
-                    # 7. Raw lines extracted (auto-open if detection failed)
-                    # should_expand_raw = not parsed_response["success"]
-                    # with st.expander("📝 Raw OCR Lines Extracted", expanded=should_expand_raw):
-                    #     if parsed_response.get("raw_text"):
-                    #         for i, text in enumerate(parsed_response["raw_text"], 1):
-                    #             st.write(f"**Line {i}:** {text}")
-                    #     else:
-                    #         st.info("No text detected in the image")
-                        
-                    # 8. Download JSON button
-                    json_str = to_downloadable_json(parsed_response)
-                    st.download_button(
-                        label="📥 Download Structured JSON",
-                        data=json_str,
-                        file_name=f"{os.path.splitext(image_name_label)[0]}_extracted.json",
-                        mime="application/json",
-                        width='stretch'
-                    )
-                    
+                    saved_json_path = save_json_output(parsed_response, doc['name'], OUTPUT_DIR)
+                    all_extraction_results.append(parsed_response)
                 except Exception as ex:
-                    st.error(f"An unexpected error occurred during processing: {str(ex)}")
-                    st.exception(ex)
-        else:
-            st.info("Click the 'Extract Identity Details' button on the left to execute OCR & parsing.")
+                    st.error(f"Error processing {doc['name']}: {str(ex)}")
+        
+        # Combine all results into single response
+        if all_extraction_results:
+            combined_response = _combine_documents_response(all_extraction_results)
             
+            # Display combined summary
+            st.success(f"Successfully processed {combined_response['summary']['documents_processed']} out of {combined_response['summary']['total_documents']} document(s)")
+            
+            # Display extraction details for ALL documents in a SINGLE 4x2 table format (UNIQUE fields only)
+            st.markdown("### Extraction Results")
+            
+            # Collect unique fields from all documents (no duplicates)
+            all_fields = []
+            seen_labels = set()
+            for idx, detail in enumerate(combined_response["summary"]["extraction_details"], 1):
+                doc_type = detail['document_type']
+                if detail['data']:
+                    for key, value in detail['data'].items():
+                        if value:
+                            label = key.replace('_', ' ').capitalize()
+                            # Only add if we haven't seen this label before
+                            if label not in seen_labels:
+                                all_fields.append(f"{label}: {value}")
+                                seen_labels.add(label)
+            
+            # Organize into 4 rows with 2 columns each (4x2 table)
+            if all_fields:
+                table_html = '<table style="width:100%; border-collapse: collapse; background: white;">'
+                for i in range(0, len(all_fields), 2):
+                    table_html += '<tr style="border-bottom: 1px solid #e0e0e0;">'
+                    
+                    # First column
+                    table_html += f'<td style="padding: 12px; width: 50%; font-size: 0.95rem;">{all_fields[i]}</td>'
+                    
+                    # Second column (if exists)
+                    if i + 1 < len(all_fields):
+                        table_html += f'<td style="padding: 12px; width: 50%; font-size: 0.95rem;">{all_fields[i + 1]}</td>'
+                    else:
+                        table_html += '<td style="padding: 12px; width: 50%;"></td>'
+                    
+                    table_html += '</tr>'
+                table_html += '</table>'
+                st.markdown(table_html, unsafe_allow_html=True)
+            
+            # Display full JSON response
+            st.markdown("### Complete JSON Response")
+            with st.expander("View Full Response Structure", expanded=True):
+                st.json(combined_response)
+            
+            # Download combined JSON
+            combined_json_str = json.dumps(combined_response, indent=2)
+            st.download_button(
+                label="Download All Results (JSON)",
+                data=combined_json_str,
+                file_name="all_documents_extracted.json",
+                mime="application/json",
+                use_container_width=True
+            )
+        
         st.markdown('</div>', unsafe_allow_html=True)
-# else:
-#     # If no file is loaded yet
-#     st.warning("⚠️ No document active. Please select a sample card or upload your own file using the sidebar panel.")
-    
-    # Beautiful landing placeholder
-    # st.markdown("""
-    # <div style="background-color: #F8FAFC; border: 2px dashed #CBD5E1; border-radius: 16px; padding: 60px; text-align: center;">
-    #     <h3 style="color: #64748B;">Ready to Extract UAE Documents</h3>
-    #     <p style="color: #94A3B8; max-width: 500px; margin: 10px auto;">
-    #         Our PaddleOCR-backed backend processes identity documents, cleans the visual layers, segments textual content, classifies headers, and formats matching key-value pairs into JSON schemas.
-    #     </p>
-    # </div>
-    # """, unsafe_allow_html=True)
+
