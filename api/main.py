@@ -13,6 +13,14 @@ from utils import extract_text, parse_ocr_text, preprocess_for_ocr
 
 app = FastAPI(title="UAE Document OCR API", version="1.0")
 
+@app.get("/")
+async def root():
+    return {
+        "message": "Welcome to the UAE Document OCR API. Use the /extract-text/ endpoint to extract text from document images."
+    }
+
+
+
 @app.post("/extract-text/")
 async def extract_text_endpoint(file: UploadFile = File(...)):
     """Extract text from uploaded document image"""
