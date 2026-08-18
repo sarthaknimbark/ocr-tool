@@ -20,7 +20,9 @@ async def root():
     }
 
 
+@app.on_event("startup")
 
+  
 @app.post("/extract-text/")
 async def extract_text_endpoint(file: UploadFile = File(...)):
     """Extract text from uploaded document image"""
